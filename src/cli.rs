@@ -15,7 +15,7 @@ pub struct Args {
 #[derive(Subcommand, Debug)]
 #[command()]
 pub enum SMSSHCommand {
-    /// Connect to a remote machine using the host configuration
+    /// Connect to a remote machine using the host configuration. SSH args are optional.
     #[command(alias = "c")]
     Connect {
         /// The host configuration to use
@@ -25,7 +25,8 @@ pub enum SMSSHCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         ssh_args: Vec<String>,
     },
-    /// Connect to a remote machine using the specified key alias
+    /// Connect to a remote machine using the specified key alias. SSH args should contain the
+    /// destination.
     #[command(alias = "ca")]
     ConnectWithAlias {
         /// The key alias to use

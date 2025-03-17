@@ -1,12 +1,12 @@
 use color_eyre::{Result, eyre::eyre};
 use nix::{
-    libc::{SIGTTOU, STDIN_FILENO, tcgetpgrp, tcsetpgrp},
-    unistd::{Pid, getpgid, getpid, setpgid},
+    libc::{STDIN_FILENO, tcsetpgrp},
+    sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction},
+    unistd::{Pid, getpid, setpgid},
 };
 use std::{
     io,
     process::{Command, ExitCode, Stdio},
-    sync::{Arc, atomic::AtomicBool},
 };
 use std::{io::Write, os::unix::process::CommandExt};
 
@@ -36,6 +36,7 @@ fn create_key_file(dir: &TempDir) -> Result<NamedTempFile> {
 }
 
 fn pull_key(alias: &KeyAliasConfig, key_file: &mut NamedTempFile) -> Result<()> {
+    println!("Fetching the key");
     let key = match alias {
         KeyAliasConfig::SecretsManager { secret_arn } => crate::aws::get_key_blocking(secret_arn)?,
     };
@@ -43,7 +44,7 @@ fn pull_key(alias: &KeyAliasConfig, key_file: &mut NamedTempFile) -> Result<()> 
     Ok(())
 }
 
-pub fn connect_by_alias(key_alias: &str, config: &Config, ssh_args: &[String]) -> Result<()> {
+pub fn connect_by_alias(key_alias: &str, config: &Config, ssh_args: &[String]) -> Result<ExitCode> {
     let key_alias_config = config
         .key_aliases
         .get(key_alias)
@@ -52,7 +53,11 @@ pub fn connect_by_alias(key_alias: &str, config: &Config, ssh_args: &[String]) -
     connect(key_alias_config, None, ssh_args)
 }
 
-pub fn connect_by_host(host_config: &str, config: &Config, ssh_args: &[String]) -> Result<()> {
+pub fn connect_by_host(
+    host_config: &str,
+    config: &Config,
+    ssh_args: &[String],
+) -> Result<ExitCode> {
     let host_config = config
         .hosts
         .get(host_config)
@@ -70,29 +75,23 @@ pub fn connect(
     key_alias_config: &KeyAliasConfig,
     destination: Option<&str>,
     ssh_args: &[String],
-) -> Result<()> {
+) -> Result<ExitCode> {
     let key_dir = create_key_directory()?;
     let mut key_file = create_key_file(&key_dir)?;
 
     pull_key(key_alias_config, &mut key_file)?;
 
-    // let mut command = Command::new("ssh");
-    // command.arg("-i");
-    // command.arg(key_file.path());
-    // command.args(ssh_args);
-    //
-    // if let Some(destination) = destination {
-    //     command.arg(destination);
-    // }
+    let mut command = Command::new("ssh");
+    command.arg("-i");
+    command.arg(key_file.path());
+    command.args(ssh_args);
 
-    let mut command = Command::new("sleep");
-    command.arg("5");
+    if let Some(destination) = destination {
+        command.arg(destination);
+    }
 
-    println!("Key file: {:?}", key_file.path());
     println!("Running ssh command: {:?}", command);
-
-    run_command_in_foreground(command)?;
-    Ok(())
+    run_command_in_foreground(command)
 }
 
 fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
@@ -102,6 +101,7 @@ fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .pre_exec(|| {
+                // Detach from the parent PGID
                 let pid = getpid();
                 setpgid(pid, pid)?;
                 Ok(())
@@ -109,44 +109,34 @@ fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
             .spawn()?
     };
 
-    // Ignore SIGTTOU while the parent is in the background
-    let stop_on_sigttou = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register_conditional_default(SIGTTOU, stop_on_sigttou.clone())?;
+    // Ignore SIGTTOU to allow moving the parent to the foreground after the child exits
+    // and to allow background logging if `tostop` is set. A custom handler would not work,
+    // the signal needs to be ignored or blocked for the background tcsetpgrp call to succeed
+    let ignore_action = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+    let old_action = unsafe { sigaction(Signal::SIGTTOU, &ignore_action)? };
 
-    // Set the foreground PGID to the child PID
+    // Set the foreground PGID to the child's PGID
     let child_pid = Pid::from_raw(child.id() as i32);
     let fgpgid_result = unsafe { tcsetpgrp(STDIN_FILENO, child_pid.as_raw()) };
-
     if fgpgid_result != 0 {
         Err(io::Error::last_os_error())?
     }
 
     let status = child.wait()?;
 
-    // Restore foreground PGID
-    let pgid = getpgid(None)?;
-    let fg_pgrp = unsafe { tcgetpgrp(STDIN_FILENO) };
-    println!("FG PGRP: {fg_pgrp}");
-    println!("Parent PGRP: {}", pgid.as_raw());
-    println!("Child PGRP: {}", child_pid.as_raw());
-    let fpgid_result = unsafe { tcsetpgrp(STDIN_FILENO, pgid.as_raw()) };
-    if fpgid_result != 0 {
+    // Set the foreground PGID to the child's PGID
+    // The parent process is in the background - this requires ignoring or blocking SIGTTOU
+    let parent_pid = getpid();
+    let fgpgid_result = unsafe { tcsetpgrp(STDIN_FILENO, parent_pid.as_raw()) };
+    if fgpgid_result != 0 {
         Err(io::Error::last_os_error())?
     }
 
-    // Restore default SIGTTOU handler
-    stop_on_sigttou.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Restore the SIGTTOU handler now that we're in the foreground again
+    unsafe { sigaction(Signal::SIGTTOU, &old_action)? };
 
     let exit_code = status
         .code()
-        .ok_or(eyre!("Child exited without status code"))?;
-    println!("Exited");
-
-    // let pgid = getpgid(None)?;
-    // let fg_pgrp = unsafe { tcgetpgrp(STDIN_FILENO) };
-    // println!("FG PGRP: {fg_pgrp}");
-    // println!("Parent PGRP: {}", pgid.as_raw());
-    // println!("Child PGRP: {}", child_pid.as_raw());
-
+        .ok_or(eyre!("Child exited without a status code"))?;
     Ok(ExitCode::from(exit_code as u8))
 }
