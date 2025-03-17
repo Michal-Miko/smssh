@@ -124,7 +124,7 @@ fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
 
     let status = child.wait()?;
 
-    // Set the foreground PGID to the child's PGID
+    // Set the foreground PGID to the parent's PGID
     // The parent process is in the background - this requires ignoring or blocking SIGTTOU
     let parent_pid = getpid();
     let fgpgid_result = unsafe { tcsetpgrp(STDIN_FILENO, parent_pid.as_raw()) };
