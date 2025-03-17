@@ -102,10 +102,12 @@ pub fn connect(
         command.arg(destination);
     }
 
-    println!("Running ssh command: {:?}", command);
+    println!("Running {:?}", command);
     run_command_in_foreground(command, term_flag)
 }
 
+/// Run a command in the foreground and bring back the parent after it exits. Terminates early if
+/// `term_flag` is set to true.
 fn run_command_in_foreground(mut command: Command, term_flag: Arc<AtomicBool>) -> Result<()> {
     let mut child = unsafe {
         command
