@@ -1,17 +1,14 @@
-use color_eyre::{
-    eyre::{bail, eyre, Context},
-    Result,
-};
+use color_eyre::{Result, eyre::eyre};
 use nix::{
-    libc::{tcsetpgrp, SIGTTOU},
-    unistd::{getpgid, setpgid, Pid},
+    libc::{SIGTTOU, STDIN_FILENO, tcgetpgrp, tcsetpgrp},
+    unistd::{Pid, getpgid, getpid, setpgid},
 };
-use std::io::Write;
 use std::{
     io,
     process::{Command, ExitCode, Stdio},
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
 };
+use std::{io::Write, os::unix::process::CommandExt};
 
 use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 use tempfile::{NamedTempFile, TempDir};
@@ -79,15 +76,19 @@ pub fn connect(
 
     pull_key(key_alias_config, &mut key_file)?;
 
-    let mut command = Command::new("ssh");
-    command.arg("-i");
-    command.arg(key_file.path());
-    command.args(ssh_args);
+    // let mut command = Command::new("ssh");
+    // command.arg("-i");
+    // command.arg(key_file.path());
+    // command.args(ssh_args);
+    //
+    // if let Some(destination) = destination {
+    //     command.arg(destination);
+    // }
 
-    if let Some(destination) = destination {
-        command.arg(destination);
-    }
+    let mut command = Command::new("sleep");
+    command.arg("300");
 
+    println!("Key file: {:?}", key_file.path());
     println!("Running ssh command: {:?}", command);
 
     run_command_in_foreground(command)?;
@@ -95,30 +96,26 @@ pub fn connect(
 }
 
 fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
-    let mut child = command
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+    let mut child = unsafe {
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .pre_exec(|| {
+                let pid = getpid();
+                setpgid(pid, pid)?;
+                Ok(())
+            })
+            .spawn()?
+    };
 
-    // Change PGID to isolate signal handling
-    let child_pid = Pid::from_raw(child.id() as i32);
-    match setpgid(child_pid, child_pid) {
-        Ok(_) => {}
-        Err(nix::errno::Errno::ESRCH) => {
-            bail!("Failed to set child PGID")
-        }
-        Err(e) => Err(io::Error::from_raw_os_error(e as i32)).context("Set child PGID")?,
-    }
-
-    // Set the foreground PGID to the child PID
-    // TODO: check if this is still needed
+    // Ignore SIGTTOU while the parent is in the background
     let stop_on_sigttou = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register_conditional_default(SIGTTOU, stop_on_sigttou.clone())?;
 
-    let fgpgid_result = unsafe { tcsetpgrp(nix::libc::STDIN_FILENO, child_pid.as_raw()) };
-
-    stop_on_sigttou.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Set the foreground PGID to the child PID
+    let child_pid = Pid::from_raw(child.id() as i32);
+    let fgpgid_result = unsafe { tcsetpgrp(STDIN_FILENO, child_pid.as_raw()) };
 
     if fgpgid_result != 0 {
         Err(io::Error::from_raw_os_error(fgpgid_result))?
@@ -128,14 +125,21 @@ fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
 
     // Restore foreground PGID
     let pgid = getpgid(None)?;
-    let fpgid_result = unsafe { tcsetpgrp(nix::libc::STDIN_FILENO, pgid.as_raw()) };
+    let fg_pgrp = unsafe { tcgetpgrp(STDIN_FILENO) };
+    println!("FG PGRP: {fg_pgrp}");
+    println!("Parent PGRP: {}", pgid.as_raw());
+    println!("Child PGRP: {}", child_pid.as_raw());
+    let fpgid_result = unsafe { tcsetpgrp(STDIN_FILENO, pgid.as_raw()) };
     if fpgid_result != 0 {
         Err(io::Error::from_raw_os_error(fpgid_result))?
     }
 
+    stop_on_sigttou.store(true, std::sync::atomic::Ordering::Relaxed);
+
     let exit_code = status
         .code()
         .ok_or(eyre!("Child exited without status code"))?;
+    println!("Exited");
 
     Ok(ExitCode::from(exit_code as u8))
 }
