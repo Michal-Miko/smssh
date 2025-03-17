@@ -86,7 +86,7 @@ pub fn connect(
     // }
 
     let mut command = Command::new("sleep");
-    command.arg("300");
+    command.arg("5");
 
     println!("Key file: {:?}", key_file.path());
     println!("Running ssh command: {:?}", command);
@@ -118,7 +118,7 @@ fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
     let fgpgid_result = unsafe { tcsetpgrp(STDIN_FILENO, child_pid.as_raw()) };
 
     if fgpgid_result != 0 {
-        Err(io::Error::from_raw_os_error(fgpgid_result))?
+        Err(io::Error::last_os_error())?
     }
 
     let status = child.wait()?;
@@ -131,15 +131,22 @@ fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
     println!("Child PGRP: {}", child_pid.as_raw());
     let fpgid_result = unsafe { tcsetpgrp(STDIN_FILENO, pgid.as_raw()) };
     if fpgid_result != 0 {
-        Err(io::Error::from_raw_os_error(fpgid_result))?
+        Err(io::Error::last_os_error())?
     }
 
+    // Restore default SIGTTOU handler
     stop_on_sigttou.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let exit_code = status
         .code()
         .ok_or(eyre!("Child exited without status code"))?;
     println!("Exited");
+
+    // let pgid = getpgid(None)?;
+    // let fg_pgrp = unsafe { tcgetpgrp(STDIN_FILENO) };
+    // println!("FG PGRP: {fg_pgrp}");
+    // println!("Parent PGRP: {}", pgid.as_raw());
+    // println!("Child PGRP: {}", child_pid.as_raw());
 
     Ok(ExitCode::from(exit_code as u8))
 }
