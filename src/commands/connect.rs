@@ -1,13 +1,17 @@
 use color_eyre::{Result, eyre::eyre};
+use crossterm::ExecutableCommand;
+use crossterm::cursor;
+use nix::sys::signal;
 use nix::{
     libc::{STDIN_FILENO, tcsetpgrp},
     sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction},
     unistd::{Pid, getpid, setpgid},
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+use std::io::stdout;
 use std::{
     io,
-    process::{Command, ExitCode, Stdio},
+    process::{Command, Stdio},
     sync::{Arc, atomic::AtomicBool},
 };
 use std::{io::Write, os::unix::process::CommandExt};
@@ -46,7 +50,7 @@ fn pull_key(alias: &KeyAliasConfig, key_file: &mut NamedTempFile) -> Result<()> 
     Ok(())
 }
 
-pub fn connect_by_alias(key_alias: &str, config: &Config, ssh_args: &[String]) -> Result<ExitCode> {
+pub fn connect_by_alias(key_alias: &str, config: &Config, ssh_args: &[String]) -> Result<()> {
     let key_alias_config = config
         .key_aliases
         .get(key_alias)
@@ -55,11 +59,7 @@ pub fn connect_by_alias(key_alias: &str, config: &Config, ssh_args: &[String]) -
     connect(key_alias_config, None, ssh_args)
 }
 
-pub fn connect_by_host(
-    host_config: &str,
-    config: &Config,
-    ssh_args: &[String],
-) -> Result<ExitCode> {
+pub fn connect_by_host(host_config: &str, config: &Config, ssh_args: &[String]) -> Result<()> {
     let host_config = config
         .hosts
         .get(host_config)
@@ -85,7 +85,7 @@ pub fn connect(
     key_alias_config: &KeyAliasConfig,
     destination: Option<&str>,
     ssh_args: &[String],
-) -> Result<ExitCode> {
+) -> Result<()> {
     let key_dir = create_key_directory()?;
     let mut key_file = create_key_file(&key_dir)?;
     let term_flag = Arc::new(AtomicBool::new(false));
@@ -106,7 +106,7 @@ pub fn connect(
     run_command_in_foreground(command, term_flag)
 }
 
-fn run_command_in_foreground(mut command: Command, term_flag: Arc<AtomicBool>) -> Result<ExitCode> {
+fn run_command_in_foreground(mut command: Command, term_flag: Arc<AtomicBool>) -> Result<()> {
     let mut child = unsafe {
         command
             .stdin(Stdio::inherit())
@@ -134,22 +134,25 @@ fn run_command_in_foreground(mut command: Command, term_flag: Arc<AtomicBool>) -
         Err(io::Error::last_os_error())?
     }
 
-    let mut status = None;
-
     // Wait for the child to exit
     loop {
         // Termination requested
         if term_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            println!("Terminating...");
-            child.kill()?;
+            let mut stdout = stdout();
+            stdout.flush()?;
+            stdout.execute(cursor::MoveToNextLine(1))?;
+            println!("\nTermination signal received, exiting...");
+
+            signal::kill(child_pid, Signal::SIGTERM).or_else(|_| child.kill())?;
+            child.wait()?;
+
+            stdout.flush()?;
+            stdout.execute(cursor::MoveToNextLine(1))?;
             break;
         }
 
         match child.try_wait() {
-            Ok(Some(child_status)) => {
-                status = Some(child_status);
-                break;
-            }
+            Ok(Some(_)) => break,
             Ok(None) => {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
@@ -171,8 +174,5 @@ fn run_command_in_foreground(mut command: Command, term_flag: Arc<AtomicBool>) -
     // Restore the SIGTTOU handler now that we're in the foreground again
     unsafe { sigaction(Signal::SIGTTOU, &old_action)? };
 
-    let exit_code = status
-        .and_then(|status| status.code())
-        .ok_or(eyre!("Child exited without a status code"))?;
-    Ok(ExitCode::from(exit_code as u8))
+    Ok(())
 }
