@@ -1,2 +1,2 @@
 # smssh
-SSH wrapper for connecting with keys stored in AWS Secrets Manager
+SSH wrapper for authenticating with keys stored in the AWS Secrets Manager
