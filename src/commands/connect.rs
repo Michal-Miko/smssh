@@ -4,9 +4,11 @@ use nix::{
     sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction},
     unistd::{Pid, getpid, setpgid},
 };
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use std::{
     io,
     process::{Command, ExitCode, Stdio},
+    sync::{Arc, atomic::AtomicBool},
 };
 use std::{io::Write, os::unix::process::CommandExt};
 
@@ -71,6 +73,14 @@ pub fn connect_by_host(
     connect(key_alias_config, Some(&host_config.destination), ssh_args)
 }
 
+fn register_termination_handlers(term_flag: Arc<AtomicBool>) -> Result<()> {
+    signal_hook::flag::register(SIGHUP, term_flag.clone())?;
+    signal_hook::flag::register(SIGINT, term_flag.clone())?;
+    signal_hook::flag::register(SIGTERM, term_flag.clone())?;
+    signal_hook::flag::register(SIGQUIT, term_flag)?;
+    Ok(())
+}
+
 pub fn connect(
     key_alias_config: &KeyAliasConfig,
     destination: Option<&str>,
@@ -78,6 +88,8 @@ pub fn connect(
 ) -> Result<ExitCode> {
     let key_dir = create_key_directory()?;
     let mut key_file = create_key_file(&key_dir)?;
+    let term_flag = Arc::new(AtomicBool::new(false));
+    register_termination_handlers(term_flag.clone())?;
 
     pull_key(key_alias_config, &mut key_file)?;
 
@@ -91,10 +103,10 @@ pub fn connect(
     }
 
     println!("Running ssh command: {:?}", command);
-    run_command_in_foreground(command)
+    run_command_in_foreground(command, term_flag)
 }
 
-fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
+fn run_command_in_foreground(mut command: Command, term_flag: Arc<AtomicBool>) -> Result<ExitCode> {
     let mut child = unsafe {
         command
             .stdin(Stdio::inherit())
@@ -122,7 +134,31 @@ fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
         Err(io::Error::last_os_error())?
     }
 
-    let status = child.wait()?;
+    let mut status = None;
+
+    // Wait for the child to exit
+    loop {
+        // Termination requested
+        if term_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            println!("Terminating...");
+            child.kill()?;
+            break;
+        }
+
+        match child.try_wait() {
+            Ok(Some(child_status)) => {
+                status = Some(child_status);
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Err(e) => {
+                println!("Error waiting for child: {:?}", e);
+                break;
+            }
+        }
+    }
 
     // Set the foreground PGID to the parent's PGID
     // The parent process is in the background - this requires ignoring or blocking SIGTTOU
@@ -136,7 +172,7 @@ fn run_command_in_foreground(mut command: Command) -> Result<ExitCode> {
     unsafe { sigaction(Signal::SIGTTOU, &old_action)? };
 
     let exit_code = status
-        .code()
+        .and_then(|status| status.code())
         .ok_or(eyre!("Child exited without a status code"))?;
     Ok(ExitCode::from(exit_code as u8))
 }
