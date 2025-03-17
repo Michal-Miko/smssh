@@ -1,4 +1,4 @@
-use color_eyre::{eyre::Context, Result};
+use color_eyre::{Result, eyre::Context};
 use std::{
     collections::HashMap,
     fmt::{Display, Formatter},
@@ -33,7 +33,7 @@ impl From<AliasKind> for KeyAliasConfig {
 
 impl Display for KeyAliasConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let yaml = serde_yaml::to_string(self).map_err(|_| std::fmt::Error)?;
+        let yaml = serde_yml::to_string(self).map_err(|_| std::fmt::Error)?;
         write!(f, "{}", yaml)
     }
 }
@@ -47,7 +47,7 @@ pub struct HostConfig {
 
 impl Display for HostConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let yaml = serde_yaml::to_string(self).map_err(|_| std::fmt::Error)?;
+        let yaml = serde_yml::to_string(self).map_err(|_| std::fmt::Error)?;
         write!(f, "{}", yaml)
     }
 }
@@ -65,7 +65,7 @@ impl Config {
 
     pub fn store(&self) -> Result<()> {
         let path = Self::config_path();
-        let yaml = serde_yaml::to_string(&self)?;
+        let yaml = serde_yml::to_string(&self)?;
         std::fs::write(path, yaml).wrap_err("Failed to write config file")?;
         Ok(())
     }
@@ -77,8 +77,7 @@ impl Config {
         if path.exists() {
             let yaml =
                 std::fs::read_to_string(path).wrap_err("Failed to read config file at {path:?}")?;
-            config =
-                serde_yaml::from_str(&yaml).wrap_err("Failed to parse config from {path:?}")?;
+            config = serde_yml::from_str(&yaml).wrap_err("Failed to parse config from {path:?}")?;
         }
 
         Ok(config)

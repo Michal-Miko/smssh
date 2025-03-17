@@ -154,7 +154,7 @@ impl AliasKind {
 
 impl Display for AliasKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let yaml = serde_yaml::to_string(self).map_err(|_| std::fmt::Error)?;
+        let yaml = serde_yml::to_string(self).map_err(|_| std::fmt::Error)?;
         write!(f, "{}", yaml)
     }
 }

@@ -1,4 +1,4 @@
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{Result, eyre::eyre};
 
 use crate::{
     cli::{ListConfigSection, RemoveConfigSection, SetConfigSection},
@@ -8,11 +8,11 @@ use crate::{
 pub fn list_config(config: &Config, command: ListConfigSection) -> Result<()> {
     match command {
         ListConfigSection::Alias => {
-            let yaml = serde_yaml::to_string(&config.key_aliases)?;
+            let yaml = serde_yml::to_string(&config.key_aliases)?;
             println!("{}", yaml);
         }
         ListConfigSection::Host => {
-            let yaml = serde_yaml::to_string(&config.hosts)?;
+            let yaml = serde_yml::to_string(&config.hosts)?;
             println!("{}", yaml);
         }
     }
